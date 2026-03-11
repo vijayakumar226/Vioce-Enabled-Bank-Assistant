@@ -70,7 +70,7 @@ declare global {
   }
 }
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "/api";
 const CHAT_STORAGE_KEY = "bank_rag_chats";
 const ACTIVE_CHAT_STORAGE_KEY = "bank_rag_active_chat";
 
@@ -479,7 +479,7 @@ export default function Page() {
       ],
     }));
 
-    const url = new URL(`${API_BASE}/chat/stream`);
+    const url = new URL(`${API_BASE}/chat/stream`, window.location.origin);
     url.searchParams.set("message", userText || "Summarize the attached files.");
     url.searchParams.set("session_id", sessionId);
     for (const attachment of attachments) {
