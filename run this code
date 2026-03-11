@@ -1,0 +1,214 @@
+✅ Use this for backend (stable)
+cd "D:\Voice chatbot"
+.\.venv\Scripts\activate
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+✅ Use this for frontend (separate terminal)
+cd "D:\Voice chatbot\frontend"
+npm run dev
+
+
+
+  cd "D:\Voice chatbot"
+  python -m pip install python-multipart
+
+  cd "D:\Voice chatbot\backend"
+  python -m uvicorn backend.main:app --reload
+
+  cd "D:\Voice chatbot\frontend"
+  npm run dev
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+What is the maximum tenure for SBI Auto Loan? 
+
+1341840453530_AUTO_LOAN_MITC
+
+What is the Loan to Value (LTV) ratio for SBI Car Loan? 
+
+1341840453530_AUTO_LOAN_MITC
+
+Is there any pre-payment penalty for SBI Auto Loan? 
+
+1341840453530_AUTO_LOAN_MITC
+
+What is the processing fee for SBI Car Loan? 
+
+1341840453530_AUTO_LOAN_MITC
+
+What is the penalty for bounced cheque in Auto Loan? 
+
+1341840453530_AUTO_LOAN_MITC
+
+🏠 Home Loan (From Home Loan MITC)
+
+What is the maximum loan tenor for SBI Home Loan? 
+
+1377606055343_HOME_LOAN_MITC
+
+What is the LTV ratio for SBI Home Loan? 
+
+1377606055343_HOME_LOAN_MITC
+
+Is fixed interest rate available for SBI Home Loan? 
+
+1377606055343_HOME_LOAN_MITC
+
+Is there any pre-closure penalty for SBI Home Loan? 
+
+1377606055343_HOME_LOAN_MITC
+
+What is the processing fee for SBI Home Loan? 
+
+1377606055343_HOME_LOAN_MITC
+
+💳 Service Charges (From Service Charges Document)
+
+What are the charges for non-maintenance of MAB in Current Account? 
+
+Annexure 30.09.2024
+
+What are debit card annual maintenance charges? 
+
+Annexure 30.09.2024
+
+What are ATM cash withdrawal charges for international transactions? 
+
+Annexure 30.09.2024
+
+What are cheque return charges? 
+
+Annexure 30.09.2024
+
+📜 Depositors’ Rights Policy
+
+What are the key commitments of the bank towards depositors?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd "D:\Voice chatbot"
+.\.venv\Scripts\Activate.ps1
+python -V
+where python
+
+
+after
+python -m apps.voice_rag_from_docs
+
+python voice_rag_from_docs.py
+
+
+Here are 10 good test questions 👇
+
+✅ Account / Savings Questions
+
+What is the minimum balance required for a savings account?
+
+What is the interest rate for savings accounts?
+
+✅ Fees & Charges Questions
+
+What are the charges for ATM withdrawal after free limit?
+
+Is there any SMS alert charge for my account?
+
+✅ Loan Questions
+
+What is the interest rate for home loans?
+
+What documents are required for a car loan?
+
+✅ Digital Banking Questions
+
+How can I reset my internet banking password?
+
+What is the UPI transaction limit per day?
+
+✅ Customer Support Questions
+
+How can I file a complaint with the bank?
+
+What is the customer care contact number?
+
+⭐ Advanced Test Questions (Very Important)
+
+These check whether your RAG is working properly:
+
+What are the foreclosure charges for loans?
+
+What should I do if my ATM transaction fails but money is debited?
+
+What documents are required to open a savings account?
+
+How long does it take to resolve a complaint?
+
+
+
+
+voice-chatbot/
+│
+├── README.md
+├── .gitignore
+├── .env.example
+│
+├── data/
+│   └── bank_docs/                 # your original bank_docs (move here)
+│
+├── indexes/
+│   └── rag_index/                 # your original rag_index (move here)
+│
+├── backend/                       # FastAPI + RAG brain
+│   ├── main.py                    # FastAPI entry
+│   ├── requirements.txt           # backend deps (optional but good)
+│   ├── rag/
+│   │   ├── pipeline.py            # answer_query(), retrieve(), prompt, llm call
+│   │   └── ingest.py              # (optional later)
+│   └── __init__.py                # can be empty
+│
+├── apps/                          # runnable apps (demo scripts)
+│   ├── voice_rag_from_docs.py     # your voice CLI demo (the one you edited)
+│   └── build_index.py             # build index script
+│
+├── frontend/                      # React UI later (empty now)
+│
+└── venv/                          # keep for now (later you can move inside backend)
