@@ -1,1 +1,8 @@
-# Vioce-Enabled-Bank-assistant
+---
+title: Voice Enabled Bank Assistant
+emoji: 🤖
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+---
