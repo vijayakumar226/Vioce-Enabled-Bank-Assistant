@@ -22,3 +22,15 @@ __pycache__/
 # OS files
 Thumbs.db
 .DS_Store
+
+data/bank_docs/*.pdf
+
+data/bank_docs/*.xls
+
+indexes/rag_index/faiss.index
+
+indexes/rag_index/chunks.json
+
+indexes/rag_index/meta.json
+
+data/chat_uploads/
