@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
 
+from backend.rag.image_handler import extract_text_from_image, split_questions
 from backend.rag.pipeline import answer_query, reload_index
 from backend.rag.rebuild import rebuild_index
 
@@ -25,11 +26,13 @@ CHAT_ATTACHMENT_EXTENSIONS = {
     ".md",
     ".csv",
     ".json",
+    ".gif",
     ".png",
     ".jpg",
     ".jpeg",
     ".webp",
 }
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_ATTACHMENT_CHARS = 6000
 
 _attachment_lock = Lock()
@@ -53,6 +56,22 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+
+
+def _stream_chat_response(
+    message: str,
+    session_id: str = "default",
+    attachment_ids: list[str] | None = None,
+):
+    attachment_contexts = _get_attachment_contexts(session_id, attachment_ids or [])
+    result = answer_query(message, attachment_contexts=attachment_contexts)
+    text = result.get("answer", "")
+
+    for word in text.split():
+        yield f"data: {json.dumps({'delta': word + ' '})}\n\n"
+        time.sleep(0.02)
+
+    yield f"data: {json.dumps({'done': True, 'sources': result.get('sources', [])})}\n\n"
 
 
 def _read_text_file(path: str) -> str:
@@ -110,19 +129,24 @@ def chat_stream(
     session_id: str = "default",
     attachment_ids: list[str] = Query(default=[]),
 ):
-    def event_generator():
-        attachment_contexts = _get_attachment_contexts(session_id, attachment_ids)
-        result = answer_query(message, attachment_contexts=attachment_contexts)
-        text = result.get("answer", "")
-
-        for word in text.split():
-            yield f"data: {json.dumps({'delta': word + ' '})}\n\n"
-            time.sleep(0.02)
-
-        yield f"data: {json.dumps({'done': True, 'sources': result.get('sources', [])})}\n\n"
-
     return StreamingResponse(
-        event_generator(),
+        _stream_chat_response(message, session_id, attachment_ids),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/chat/stream")
+def chat_stream_post(
+    req: ChatRequest,
+    attachment_ids: list[str] = Query(default=[]),
+):
+    return StreamingResponse(
+        _stream_chat_response(req.message, req.session_id or "default", attachment_ids),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -133,6 +157,70 @@ def chat_stream(
 
 
 if HAS_MULTIPART:
+    @app.post("/chat/image")
+    async def chat_with_image(
+        file: UploadFile = File(...),
+        session_id: str | None = Form(default=None),
+    ):
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        if ext not in IMAGE_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported image type '{ext}'. Allowed: {sorted(IMAGE_EXTENSIONS)}",
+            )
+
+        try:
+            image_bytes = await file.read()
+        finally:
+            await file.close()
+
+        extracted_text = (await extract_text_from_image(image_bytes)).strip()
+        if not extracted_text or len(extracted_text) < 2:
+            return {
+                "answer": (
+                    "I could not read the text in your image clearly. Please try:\n\n"
+                    "\u2022 Taking a clearer screenshot\n"
+                    "\u2022 Ensuring text is large enough\n"
+                    "\u2022 Or simply type your question below"
+                ),
+                "extracted_text": "",
+                "sources": [],
+                "session_id": session_id or "default",
+            }
+
+        questions = split_questions(extracted_text)
+
+        if len(questions) > 1:
+            separator = "-" * 40
+            full_answer = (
+                f"I found {len(questions)} questions in your image. Here are all the answers:\n\n"
+                f"{separator}\n\n"
+            )
+
+            for idx, question in enumerate(questions, 1):
+                result = answer_query(question)
+                full_answer += (
+                    f"Q{idx}: {question}\n\n"
+                    f"{result['answer']}\n\n"
+                    f"{separator}\n\n"
+                )
+
+            return {
+                "answer": full_answer.strip(),
+                "extracted_text": extracted_text,
+                "sources": [],
+                "session_id": session_id or "default",
+            }
+
+        result = answer_query(extracted_text)
+        return {
+            "answer": result["answer"],
+            "extracted_text": extracted_text,
+            "sources": result.get("sources", []),
+            "session_id": session_id or "default",
+        }
+
+
     @app.post("/chat/attachments")
     async def upload_chat_attachment(
         session_id: str = Form(...),
@@ -204,6 +292,14 @@ if HAS_MULTIPART:
 
         return {"ok": True, "filename": file.filename, "chunks_count": chunks_count}
 else:
+    @app.post("/chat/image")
+    async def chat_with_image_unavailable():
+        raise HTTPException(
+            status_code=503,
+            detail='Image uploads require the optional "python-multipart" package on the backend.',
+        )
+
+
     @app.post("/chat/attachments")
     async def upload_chat_attachment_unavailable():
         raise HTTPException(

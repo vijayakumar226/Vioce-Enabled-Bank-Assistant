@@ -6,49 +6,111 @@ and writes faiss.index / chunks.json / meta.json to index_dir.
 Returns the number of chunks indexed.
 """
 
-import os
-import json
 import glob
+import json
+import os
+import re
 
-import numpy as np
 import faiss
-from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
 
-# ── Config ────────────────────────────────────────────────────────────────────
 EMBED_MODEL = "all-MiniLM-L6-v2"
 CHUNK_CHARS = 1200
-OVERLAP_CHARS = 200
+OVERLAP_CHARS = 100
+MIN_CHUNK_CHARS = 50
 
-# Singleton embed model (reuse if already loaded elsewhere)
 _embed_model: SentenceTransformer | None = None
 
 
 def _get_embed_model() -> SentenceTransformer:
     global _embed_model
     if _embed_model is None:
-        _embed_model = SentenceTransformer(EMBED_MODEL)
+        _embed_model = SentenceTransformer(EMBED_MODEL, local_files_only=True)
     return _embed_model
 
 
-# ── Chunking ──────────────────────────────────────────────────────────────────
+def _split_sentences(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", normalized)
+    return [part.strip() for part in parts if part.strip()]
 
-def _chunk_text(text: str, chunk_chars: int = CHUNK_CHARS, overlap: int = OVERLAP_CHARS) -> list[str]:
-    text = " ".join(text.split())
+
+def _chunk_paragraph(paragraph: str, chunk_chars: int, overlap: int) -> list[str]:
+    sentences = _split_sentences(paragraph)
+    if not sentences:
+        return []
+
     chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(len(text), start + chunk_chars)
-        chunks.append(text[start:end])
-        if end == len(text):
-            break
-        start = end - overlap
-        if start < 0:
+    current: list[str] = []
+
+    for sentence in sentences:
+        candidate = " ".join(current + [sentence]).strip()
+        if current and len(candidate) > chunk_chars:
+            chunk = " ".join(current).strip()
+            if len(chunk) >= MIN_CHUNK_CHARS:
+                chunks.append(chunk)
+
+            carryover: list[str] = []
+            carried_length = 0
+            for existing in reversed(current):
+                sentence_length = len(existing) + (1 if carryover else 0)
+                if carryover and carried_length + sentence_length > overlap:
+                    break
+                carryover.insert(0, existing)
+                carried_length += sentence_length
+
+            current = carryover + [sentence]
+        else:
+            current.append(sentence)
+
+        if len(sentence) > chunk_chars:
+            if current and current[-1] == sentence and len(current) > 1:
+                previous_chunk = " ".join(current[:-1]).strip()
+                if len(previous_chunk) >= MIN_CHUNK_CHARS:
+                    chunks.append(previous_chunk)
+                current = [sentence]
+
             start = 0
+            fragments: list[str] = []
+            while start < len(sentence):
+                end = min(len(sentence), start + chunk_chars)
+                window = sentence[start:end]
+                if end < len(sentence):
+                    split_at = max(window.rfind(", "), window.rfind("; "), window.rfind(": "))
+                    if split_at > MIN_CHUNK_CHARS:
+                        end = start + split_at + 1
+                        window = sentence[start:end]
+                fragment = window.strip()
+                if len(fragment) >= MIN_CHUNK_CHARS:
+                    fragments.append(fragment)
+                if end == len(sentence):
+                    break
+                start = max(end - overlap, start + 1)
+
+            if fragments:
+                chunks.extend(fragments[:-1])
+                current = [fragments[-1]]
+
+    final_chunk = " ".join(current).strip()
+    if len(final_chunk) >= MIN_CHUNK_CHARS:
+        chunks.append(final_chunk)
+
     return chunks
 
 
-# ── Loaders ───────────────────────────────────────────────────────────────────
+def _chunk_text(text: str, chunk_chars: int = CHUNK_CHARS, overlap: int = OVERLAP_CHARS) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+    if not paragraphs:
+        paragraphs = [text.strip()]
+
+    chunks: list[str] = []
+    for paragraph in paragraphs:
+        chunks.extend(_chunk_paragraph(paragraph, chunk_chars, overlap))
+    return [chunk for chunk in chunks if len(chunk) >= MIN_CHUNK_CHARS]
+
 
 def _load_pdf(path: str) -> list[tuple[str, dict]]:
     reader = PdfReader(path)
@@ -81,8 +143,6 @@ def _load_all_docs(docs_dir: str) -> list[tuple[str, dict]]:
     return items
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
-
 def rebuild_index(docs_dir: str, index_dir: str) -> int:
     """
     Build (or rebuild) the FAISS index from all PDF/TXT files in docs_dir.
@@ -99,8 +159,8 @@ def rebuild_index(docs_dir: str, index_dir: str) -> int:
     chunks: list[str] = []
     metas: list[dict] = []
     for text, meta in raw_items:
-        for c in _chunk_text(text):
-            chunks.append(c)
+        for chunk in _chunk_text(text):
+            chunks.append(chunk)
             metas.append(meta)
 
     model = _get_embed_model()

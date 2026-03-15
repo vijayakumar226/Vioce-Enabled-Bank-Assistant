@@ -1,13 +1,7 @@
 "use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-
-type Source = {
-  source: string;
-  score: number;
-  text: string;
-  kind?: "rag" | "attachment";
-};
 
 type Attachment = {
   id: string;
@@ -20,7 +14,11 @@ type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  sources?: Source[];
+  extractedText?: string;
+  imageUrl?: string;
+  imageName?: string;
+  messageType?: "text" | "image" | "pending_image";
+  pendingFile?: File | null;
   attachments?: Attachment[];
 };
 
@@ -38,6 +36,11 @@ type UploadedAttachmentResponse = {
   name: string;
   mime_type: string;
   preview?: string;
+};
+
+type ImageChatResponse = {
+  answer: string;
+  extracted_text?: string;
 };
 
 type SpeechRecognitionInstance = {
@@ -70,7 +73,7 @@ declare global {
   }
 }
 
-const API_BASE = "/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 const CHAT_STORAGE_KEY = "bank_rag_chats";
 const ACTIVE_CHAT_STORAGE_KEY = "bank_rag_active_chat";
 
@@ -83,6 +86,7 @@ function createAssistantMessage(content: string): Message {
     id: createId(),
     role: "assistant",
     content,
+    messageType: "text",
   };
 }
 
@@ -91,7 +95,11 @@ function createChat(): Chat {
     id: createId(),
     title: "New chat",
     sessionId: `sess_${createId()}`,
-    messages: [createAssistantMessage("Hi! I'm your bank assistant. Ask me something.")],
+    messages: [
+      createAssistantMessage(
+        "Hello! I am your SBI Banking Assistant.\n\nI can help you with loans, accounts, charges, complaints and more.\n\nWhat would you like to know today?"
+      ),
+    ],
   };
 }
 
@@ -119,10 +127,23 @@ function normalizeChats(raw: Chat[]): Chat[] {
       messages: chat.messages.map((message) => ({
         ...message,
         id: message.id || createId(),
+        messageType:
+          message.messageType ?? (message.imageUrl ? "image" : "text"),
+        pendingFile: null,
         attachments: message.attachments ?? [],
       })),
     };
   });
+}
+
+function serializeChats(chats: Chat[]): Chat[] {
+  return chats.map((chat) => ({
+    ...chat,
+    messages: chat.messages.map((message) => ({
+      ...message,
+      pendingFile: null,
+    })),
+  }));
 }
 
 export default function Page() {
@@ -140,7 +161,7 @@ export default function Page() {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const streamRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<AbortController | null>(null);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef("");
@@ -200,17 +221,15 @@ export default function Page() {
     setMounted(true);
 
     const storedChats = localStorage.getItem(CHAT_STORAGE_KEY);
-    const storedActiveChat = localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY);
-
     const parsedChats = storedChats ? normalizeChats(JSON.parse(storedChats) as Chat[]) : [];
-    const nextChats = parsedChats.length > 0 ? parsedChats : [createChat()];
-    const nextActiveChatId =
-      storedActiveChat && nextChats.some((chat) => chat.id === storedActiveChat)
-        ? storedActiveChat
-        : nextChats[0].id;
+    const freshChat = createChat();
+    const nextChats = [freshChat, ...parsedChats];
+    const nextActiveChatId = freshChat.id;
 
     setChats(nextChats);
     setActiveChatId(nextActiveChatId);
+    chatsRef.current = nextChats;
+    activeChatIdRef.current = nextActiveChatId;
 
     const SpeechRecognition =
       typeof window !== "undefined"
@@ -252,7 +271,7 @@ export default function Page() {
 
   useEffect(() => {
     if (!mounted) return;
-    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chats));
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(serializeChats(chats)));
   }, [chats, mounted]);
 
   useEffect(() => {
@@ -261,12 +280,24 @@ export default function Page() {
   }, [activeChatId, mounted]);
 
   useEffect(() => {
+    function saveBeforeUnload() {
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(serializeChats(chatsRef.current)));
+      if (activeChatIdRef.current) {
+        localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, activeChatIdRef.current);
+      }
+    }
+
+    window.addEventListener("beforeunload", saveBeforeUnload);
+    return () => window.removeEventListener("beforeunload", saveBeforeUnload);
+  }, []);
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chats, isSending]);
 
   useEffect(() => {
     return () => {
-      streamRef.current?.close();
+      streamRef.current?.abort();
       recognitionRef.current?.stop();
     };
   }, []);
@@ -414,6 +445,286 @@ export default function Page() {
     } satisfies Attachment;
   }, [ensureChat]);
 
+  const removePendingAttachment = useCallback((attachmentId: string) => {
+    setPendingAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
+  }, []);
+
+  const sendMessage = useCallback(
+    async (userMessage: string, attachments: Attachment[] = pendingAttachments) => {
+      const userText = userMessage.trim();
+      if (!userText && attachments.length === 0) {
+        return;
+      }
+
+      const targetChat = ensureChat();
+      const chatId = targetChat.id;
+      const sessionId = targetChat.sessionId;
+      const userMessageId = createId();
+      const assistantMessageId = createId();
+      const title = userText ? makeTitle(userText) : targetChat.title;
+
+      setInput("");
+      setPendingAttachments([]);
+      setIsSending(true);
+      setAttachmentError(null);
+
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        title:
+          chat.messages.some((message) => message.role === "user") || !userText ? chat.title : title,
+        messages: [
+          ...chat.messages,
+          {
+            id: userMessageId,
+            role: "user",
+            content: userText || "Attached files",
+            attachments,
+          },
+          {
+            id: assistantMessageId,
+            role: "assistant",
+            content: "",
+          },
+        ],
+      }));
+
+      const url = new URL(`${API_BASE}/chat/stream`, window.location.origin);
+      for (const attachment of attachments) {
+        url.searchParams.append("attachment_ids", attachment.id);
+      }
+
+      streamRef.current?.abort();
+      const abortController = new AbortController();
+      streamRef.current = abortController;
+
+      let accumulated = "";
+      let buffer = "";
+
+      try {
+        const response = await fetch(url.toString(), {
+          method: "POST",
+          headers: {
+            Accept: "text/event-stream",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message: userText || "Summarize the attached files.",
+            session_id: sessionId,
+          }),
+          signal: abortController.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error: ${response.status}`);
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+
+        if (!reader) {
+          setIsSending(false);
+          return;
+        }
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split("\n\n");
+          buffer = events.pop() ?? "";
+
+          for (const eventChunk of events) {
+            const dataLines = eventChunk
+              .split("\n")
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trim())
+              .join("");
+
+            if (!dataLines) {
+              continue;
+            }
+
+            const payload = JSON.parse(dataLines) as {
+              delta?: string;
+              done?: boolean;
+            };
+
+            if (payload.delta) {
+              accumulated += payload.delta;
+              updateChat(chatId, (chat) => ({
+                ...chat,
+                messages: chat.messages.map((message, index, messages) =>
+                  index === messages.length - 1 && message.id === assistantMessageId
+                    ? { ...message, content: accumulated }
+                    : message
+                ),
+              }));
+            }
+          }
+        }
+
+        setIsSending(false);
+        setTimeout(() => speak(accumulated), 200);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        console.error("Chat error:", error);
+        setIsSending(false);
+        updateChat(chatId, (chat) => ({
+          ...chat,
+          messages: chat.messages.map((message, index, messages) =>
+            index === messages.length - 1 && message.id === assistantMessageId
+              ? {
+                  ...message,
+                  content: "I couldn't complete that request. Please try again.",
+                }
+              : message
+          ),
+        }));
+      } finally {
+        if (streamRef.current === abortController) {
+          streamRef.current = null;
+        }
+      }
+    },
+    [ensureChat, pendingAttachments, speak, updateChat]
+  );
+
+  const handleImageSelect = useCallback(
+    (file: File) => {
+      const targetChat = ensureChat();
+      const chatId = targetChat.id;
+      const imageUrl = URL.createObjectURL(file);
+      const title = makeTitle(file.name || "Image question");
+
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        title: chat.messages.some((message) => message.role === "user") ? chat.title : title,
+        messages: [
+          ...chat.messages,
+          {
+            id: createId(),
+            role: "user",
+            content: "",
+            imageUrl,
+            imageName: file.name,
+            messageType: "pending_image",
+            pendingFile: file,
+            attachments: [],
+          },
+        ],
+      }));
+    },
+    [ensureChat, updateChat]
+  );
+
+  const processImage = useCallback(
+    async (messageId: string) => {
+      const chatId = activeChatIdRef.current;
+      if (!chatId) return;
+
+      const chat = chatsRef.current.find((item) => item.id === chatId);
+      const targetMessage = chat?.messages.find((message) => message.id === messageId);
+      const file = targetMessage?.pendingFile;
+      if (!file || !chat) return;
+
+      const assistantMessageId = createId();
+
+      updateChat(chatId, (currentChat) => ({
+        ...currentChat,
+        messages: [
+          ...currentChat.messages.map((message): Message =>
+            message.id === messageId
+              ? ({
+                  ...message,
+                  messageType: "image",
+                  pendingFile: null,
+                } satisfies Message)
+              : message
+          ),
+          ({
+            id: assistantMessageId,
+            role: "assistant",
+            content: "Reading your image...",
+            messageType: "text",
+          } satisfies Message),
+        ],
+      }));
+
+      setAttachmentError(null);
+      setIsSending(true);
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("session_id", chat.sessionId);
+
+        const response = await fetch(`${API_BASE}/chat/image`, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error: ${response.status}`);
+        }
+
+        const data = (await response.json()) as ImageChatResponse;
+        updateChat(chatId, (currentChat) => ({
+          ...currentChat,
+          messages: currentChat.messages.map((message) =>
+            message.id === assistantMessageId
+              ? {
+                  ...message,
+                  content: data.answer,
+                  extractedText: data.extracted_text?.trim() || undefined,
+                }
+              : message
+          ),
+        }));
+
+        setTimeout(() => speak(data.answer), 200);
+      } catch (error) {
+        console.error("Image chat error:", error);
+        updateChat(chatId, (currentChat) => ({
+          ...currentChat,
+          messages: currentChat.messages.map((message) =>
+            message.id === assistantMessageId
+              ? {
+                  ...message,
+                  content: "Could not process the image. Please type your question directly.",
+                }
+              : message
+          ),
+        }));
+      } finally {
+        setIsSending(false);
+      }
+    },
+    [speak, updateChat]
+  );
+
+  const cancelImage = useCallback(
+    (messageId: string) => {
+      const chatId = activeChatIdRef.current;
+      if (!chatId) return;
+
+      updateChat(chatId, (chat) => {
+        const targetMessage = chat.messages.find((message) => message.id === messageId);
+        if (targetMessage?.imageUrl) {
+          URL.revokeObjectURL(targetMessage.imageUrl);
+        }
+
+        return {
+          ...chat,
+          messages: chat.messages.filter((message) => message.id !== messageId),
+        };
+      });
+    },
+    [updateChat]
+  );
+
   const handleAttachFiles = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(event.target.files ?? []);
@@ -422,8 +733,18 @@ export default function Page() {
       setAttachmentError(null);
 
       try {
-        const uploaded = await Promise.all(files.map((file) => uploadAttachment(file)));
-        setPendingAttachments((prev) => [...prev, ...uploaded]);
+        const imageTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+        const nonImageFiles = files.filter((file) => !imageTypes.includes(file.type));
+        const imageFiles = files.filter((file) => imageTypes.includes(file.type));
+
+        if (nonImageFiles.length > 0) {
+          const uploaded = await Promise.all(nonImageFiles.map((file) => uploadAttachment(file)));
+          setPendingAttachments((prev) => [...prev, ...uploaded]);
+        }
+
+        for (const imageFile of imageFiles) {
+          handleImageSelect(imageFile);
+        }
       } catch (error) {
         setAttachmentError(error instanceof Error ? error.message : "Attachment upload failed.");
       } finally {
@@ -432,116 +753,19 @@ export default function Page() {
         }
       }
     },
-    [uploadAttachment]
+    [handleImageSelect, uploadAttachment]
   );
 
-  const removePendingAttachment = useCallback((attachmentId: string) => {
-    setPendingAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
-  }, []);
+  const formatMessage = (content: string) => {
+    if (!content) return null;
 
-  const sendMessage = useCallback(async () => {
-    const userText = input.trim();
-    const attachments = pendingAttachments;
-
-    if (!userText && attachments.length === 0) {
-      return;
-    }
-
-    const targetChat = ensureChat();
-    const chatId = targetChat.id;
-    const sessionId = targetChat.sessionId;
-    const userMessageId = createId();
-    const assistantMessageId = createId();
-    const title = userText ? makeTitle(userText) : targetChat.title;
-
-    setInput("");
-    setPendingAttachments([]);
-    setIsSending(true);
-    setAttachmentError(null);
-
-    updateChat(chatId, (chat) => ({
-      ...chat,
-      title:
-        chat.messages.some((message) => message.role === "user") || !userText ? chat.title : title,
-      messages: [
-        ...chat.messages,
-        {
-          id: userMessageId,
-          role: "user",
-          content: userText || "Attached files",
-          attachments,
-        },
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          content: "",
-        },
-      ],
-    }));
-
-    const url = new URL(`${API_BASE}/chat/stream`, window.location.origin);
-    url.searchParams.set("message", userText || "Summarize the attached files.");
-    url.searchParams.set("session_id", sessionId);
-    for (const attachment of attachments) {
-      url.searchParams.append("attachment_ids", attachment.id);
-    }
-
-    streamRef.current?.close();
-    let accumulated = "";
-
-    const eventSource = new EventSource(url.toString());
-    streamRef.current = eventSource;
-
-    eventSource.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as {
-        delta?: string;
-        done?: boolean;
-        sources?: Source[];
-      };
-
-      if (payload.delta) {
-        accumulated += payload.delta;
-        updateChat(chatId, (chat) => ({
-          ...chat,
-          messages: chat.messages.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, content: `${message.content}${payload.delta}` }
-              : message
-          ),
-        }));
-      }
-
-      if (payload.done) {
-        updateChat(chatId, (chat) => ({
-          ...chat,
-          messages: chat.messages.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, sources: payload.sources ?? [] }
-              : message
-          ),
-        }));
-        eventSource.close();
-        setIsSending(false);
-        setTimeout(() => speak(accumulated), 200);
-      }
-    };
-
-    eventSource.onerror = () => {
-      eventSource.close();
-      setIsSending(false);
-      updateChat(chatId, (chat) => ({
-        ...chat,
-        messages: chat.messages.map((message) =>
-          message.id === assistantMessageId && !message.content
-            ? {
-                ...message,
-                content: "I couldn't complete that request. Please try again.",
-              }
-            : message
-        ),
-      }));
-    };
-  }, [ensureChat, input, pendingAttachments, speak, updateChat]);
+    return content.split("\n").map((line, index, lines) => (
+      <span key={`${index}-${line.slice(0, 20)}`}>
+        {line || "\u00A0"}
+        {index < lines.length - 1 && <br />}
+      </span>
+    ));
+  };
 
   if (!mounted || !activeChat) {
     return null;
@@ -688,9 +912,78 @@ export default function Page() {
                     : "border border-white/10 bg-[#12151c] text-zinc-100"
                 }`}
               >
-                <div className="whitespace-pre-wrap leading-6">
-                  {message.content || <span className="text-zinc-500">Thinking...</span>}
-                </div>
+                {message.messageType !== "pending_image" && (
+                  <div
+                    className="leading-6"
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {message.content ? (
+                      message.role === "assistant" ? (
+                        formatMessage(message.content)
+                      ) : (
+                        message.content
+                      )
+                    ) : (
+                      <span className="text-zinc-500">Thinking...</span>
+                    )}
+                  </div>
+                )}
+
+                {message.imageUrl && (
+                  <div className="mt-3">
+                    <Image
+                      src={message.imageUrl}
+                      alt={message.imageName || "uploaded image"}
+                      width={200}
+                      height={200}
+                      className="block max-h-[200px] max-w-[200px] rounded-xl object-cover"
+                      unoptimized
+                    />
+                  </div>
+                )}
+
+                {message.messageType === "pending_image" && (
+                  <div className="mt-3">
+                    {message.imageUrl && (
+                      <div className="mb-3">
+                        <Image
+                          src={message.imageUrl}
+                          alt={message.imageName || "uploaded image"}
+                          width={200}
+                          height={200}
+                          className="block max-h-[200px] max-w-[200px] rounded-xl object-cover"
+                          unoptimized
+                        />
+                      </div>
+                    )}
+                    <div className="text-[13px] text-zinc-400">
+                      What would you like me to do with this image?
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        onClick={() => void processImage(message.id)}
+                        className="rounded-lg bg-sky-500 px-3 py-2 text-[13px] text-white transition hover:bg-sky-400"
+                      >
+                        Read and Answer Questions
+                      </button>
+                      <button
+                        onClick={() => cancelImage(message.id)}
+                        className="rounded-lg border border-white/10 px-3 py-2 text-[13px] text-zinc-400 transition hover:bg-white/5 hover:text-white"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {message.extractedText && (
+                  <div className="mt-3 text-[11px] italic text-zinc-500">
+                    Extracted: {message.extractedText}
+                  </div>
+                )}
 
                 {message.attachments && message.attachments.length > 0 && (
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -709,23 +1002,6 @@ export default function Page() {
                   </div>
                 )}
 
-                {message.sources && message.sources.length > 0 && (
-                  <details className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400">
-                    <summary className="cursor-pointer list-none font-medium text-zinc-300">
-                      Sources
-                    </summary>
-                    <div className="mt-2 space-y-2">
-                      {message.sources.map((source, index) => (
-                        <div key={`${source.source}-${index}`} className="rounded-xl bg-black/10 px-3 py-2">
-                          <div className="font-medium text-zinc-200">
-                            {source.source} {source.kind === "attachment" ? "attachment" : ""}
-                          </div>
-                          <div className="mt-1 text-zinc-400">{source.score.toFixed(3)}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
               </div>
             ))}
             <div ref={bottomRef} />
@@ -771,7 +1047,7 @@ export default function Page() {
                   type="file"
                   className="hidden"
                   multiple
-                  accept=".pdf,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.webp"
+                  accept=".pdf,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.webp,.gif"
                   onChange={handleAttachFiles}
                 />
 
@@ -784,7 +1060,7 @@ export default function Page() {
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey) {
                         event.preventDefault();
-                        void sendMessage();
+                        void sendMessage(input, pendingAttachments);
                       }
                     }}
                   />
@@ -804,7 +1080,7 @@ export default function Page() {
                 </button>
 
                 <button
-                  onClick={() => void sendMessage()}
+                  onClick={() => void sendMessage(input, pendingAttachments)}
                   disabled={isSending}
                   className="flex h-11 min-w-11 shrink-0 items-center justify-center rounded-2xl bg-white text-sm font-medium text-[#14161b] transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
                   aria-label="Send message"
