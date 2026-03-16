@@ -279,17 +279,19 @@ def _load_index_from_disk() -> dict:
     return {"index": idx, "chunks": chunks, "meta": meta}
 
 
-def reload_index() -> None:
-    """Hot-swap the in-memory FAISS index from disk. Thread-safe."""
+def reload_index():
+    if not os.path.exists(INDEX_DIR):
+        os.makedirs(INDEX_DIR, exist_ok=True)
+    
+    if not os.path.exists(os.path.join(INDEX_DIR, "faiss.index")):
+        import logging
+        logging.getLogger(__name__).warning(
+            "Index not found — rebuilding from documents..."
+        )
+        from backend.rag.rebuild import rebuild_index
+        rebuild_index()
+    
     new = _load_index_from_disk()
-    with _lock:
-        _cache["index"] = new["index"]
-        _cache["chunks"] = new["chunks"]
-        _cache["meta"] = new["meta"]
-
-
-reload_index()
-
 embed_model = SentenceTransformer(EMBED_MODEL, local_files_only=False)
 
 hf_token = os.getenv("HF_TOKEN")
