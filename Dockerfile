@@ -26,6 +26,7 @@ RUN python apps/build_index.py
 # Install frontend dependencies and build
 WORKDIR /app/frontend
 RUN npm install
+ENV NEXT_PUBLIC_API_URL=""
 RUN npm run build
 
 # Copy nginx config
