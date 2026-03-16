@@ -290,7 +290,7 @@ def reload_index() -> None:
 
 reload_index()
 
-embed_model = SentenceTransformer(EMBED_MODEL, local_files_only=True)
+embed_model = SentenceTransformer(EMBED_MODEL, local_files_only=False)
 
 hf_token = os.getenv("HF_TOKEN")
 logger.info("pipeline HF_TOKEN present=%s", bool(hf_token))
